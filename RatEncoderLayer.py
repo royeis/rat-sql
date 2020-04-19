@@ -31,15 +31,14 @@ class RatEncoderLayer(nn.Module):
 
         self.activation = _get_activation_fn(activation)
 
-    def forward(self, xi, xj, relation_bias, src_mask=None, src_key_padding_mask=None):
-        zi = self.relation_attn(xi, xj, xj, relation_bias, attn_mask=src_mask,
-                                key_padding_mask=src_key_padding_mask)[0]
-        yi_tag = xi + self.dropout1(zi)
-        yi_tag = self.norm1(yi_tag)
+    def forward(self, sequence, relations):
+        z = self.relation_attn(sequence, sequence, sequence, relations)
+        y_tag = sequence + self.dropout1(z)
+        y_tag = self.norm1(y_tag)
         if hasattr(self, "activation"):
-            tmp = self.linear2(self.dropout(self.activation(self.linear1(yi_tag))))
+            tmp = self.linear2(self.dropout(self.activation(self.linear1(y_tag))))
         else:  # for backward compatibility
-            tmp = self.linear2(self.dropout(F.relu(self.linear1(yi_tag))))
-        yi = yi_tag + self.dropout2(tmp)
-        yi = self.norm2(yi)
-        return yi
+            tmp = self.linear2(self.dropout(F.relu(self.linear1(y_tag))))
+        y = y_tag + self.dropout2(tmp)
+        y = self.norm2(y)
+        return y

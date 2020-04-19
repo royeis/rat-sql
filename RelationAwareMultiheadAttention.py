@@ -1,106 +1,61 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.init import xavier_uniform_
-from torch.nn.init import constant_
-from torch.nn.init import xavier_normal_
-from torch.nn.parameter import Parameter
 from torch.nn.modules import Linear
+import math
 
 
 class RelationAwareMultiheadAttention(nn.Module):
-    __annotations__ = {
-        'bias_k': torch._jit_internal.Optional[torch.Tensor],
-        'bias_v': torch._jit_internal.Optional[torch.Tensor],
-    }
-    __constants__ = ['q_proj_weight', 'k_proj_weight', 'v_proj_weight', 'in_proj_weight']
 
-    def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=True, add_zero_attn=False, kdim=None,
-                 vdim=None):
+    def __init__(self, embed_dim, num_heads, dropout=0.):
         super(RelationAwareMultiheadAttention, self).__init__()
         self.embed_dim = embed_dim
-        self.kdim = kdim if kdim is not None else embed_dim
-        self.vdim = vdim if vdim is not None else embed_dim
-        self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
-
         self.num_heads = num_heads
-        self.dropout = dropout
         self.head_dim = embed_dim // num_heads
         assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+        self.dropout = nn.Dropout(dropout)
+        self.W_Q = Linear(embed_dim, embed_dim, bias=False)
+        self.W_K = Linear(embed_dim, embed_dim, bias=False)
+        self.W_V = Linear(embed_dim, embed_dim, bias=False)
+        self.relation_bias = nn.Embedding(33, embed_dim)
 
-        if self._qkv_same_embed_dim is False:
-            self.q_proj_weight = Parameter(torch.Tensor(embed_dim, embed_dim))
-            self.k_proj_weight = Parameter(torch.Tensor(embed_dim, self.kdim))
-            self.v_proj_weight = Parameter(torch.Tensor(embed_dim, self.vdim))
-            self.register_parameter('in_proj_weight', None)
-        else:
-            self.in_proj_weight = Parameter(torch.empty(3 * embed_dim, embed_dim))
-            self.register_parameter('q_proj_weight', None)
-            self.register_parameter('k_proj_weight', None)
-            self.register_parameter('v_proj_weight', None)
+    def forward(self, query, key, value, relations):
+        batch_size = query.size(0)
+        seq_len = query.size(1)
+        assert seq_len == relations.size(1), "there should be a relation between each pair of items in the input"
 
-        if bias:
-            self.in_proj_bias = Parameter(torch.empty(3 * embed_dim))
-        else:
-            self.register_parameter('in_proj_bias', None)
-        self.out_proj = Linear(embed_dim, embed_dim, bias=bias)
+        # prepare the correct relation representation for each pair of items in the input
+        r = self.relation_bias(relations)
 
-        if add_bias_kv:
-            self.bias_k = Parameter(torch.empty(1, 1, embed_dim))   #r_ij key
-            self.bias_v = Parameter(torch.empty(1, 1, embed_dim))   #r_ij value
-        else:
-            self.bias_k = self.bias_v = None
+        # apply matrix multiplications
+        q_tmp = self.W_Q(query)
+        k_tmp = self.W_K(key)
+        v_tmp = self.W_V(value)
 
-        self.add_zero_attn = add_zero_attn
+        # add relation bias
+        k_tmp = k_tmp.unsqueeze(2).repeat(1, 1, seq_len, 1)
+        v_tmp = v_tmp.unsqueeze(2).repeat(1, 1, seq_len, 1)
+        k_tmp = torch.add(k_tmp, 1, r)
+        v_tmp = torch.add(v_tmp, 1, r)
+        #################################
+        # split all tensors to num_heads
+        q_tmp = q_tmp.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k_tmp = k_tmp.view(batch_size, seq_len, seq_len, self.num_heads, self.head_dim)
+        v_tmp = v_tmp.view(batch_size, seq_len, seq_len, self.num_heads, self.head_dim)
 
-        self._reset_parameters()
+        # prepare to multiply matrices of dim seq_len * head_dim
+        q_tmp = q_tmp.transpose(1, 2)
+        k_tmp = k_tmp.transpose(2, 3)
+        v_tmp = v_tmp.transpose(2, 3)
 
-    def _reset_parameters(self):
-        if self._qkv_same_embed_dim:
-            xavier_uniform_(self.in_proj_weight)
-        else:
-            xavier_uniform_(self.q_proj_weight)
-            xavier_uniform_(self.k_proj_weight)
-            xavier_uniform_(self.v_proj_weight)
+        scores = torch.matmul(q_tmp, k_tmp.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        alpha = F.softmax(scores, -1)
 
-        if self.in_proj_bias is not None:
-            constant_(self.in_proj_bias, 0.)
-            constant_(self.out_proj.bias, 0.)
-        if self.bias_k is not None:
-            xavier_normal_(self.bias_k)
-        if self.bias_v is not None:
-            xavier_normal_(self.bias_v)
+        if self.dropout is not None:
+            alpha = self.dropout(alpha)
 
-    def __setstate__(self, state):
-        super(RelationAwareMultiheadAttention, self).__setstate__(state)
+        out = torch.matmul(alpha, v_tmp)
 
-        # Support loading old MultiheadAttention checkpoints generated by v1.1.0
-        if 'self._qkv_same_embed_dim' not in self.__dict__:
-            self._qkv_same_embed_dim = True
 
-    def forward(self, query, key, value, relation_bias, key_padding_mask=None,
-                need_weights=True, attn_mask=None):
+        print('hello')
 
-        self.bias_k = nn.Parameter(relation_bias)
-        self.bias_v = nn.Parameter(relation_bias)
-
-        if not self._qkv_same_embed_dim:
-            return F.multi_head_attention_forward(
-                query, key, value, self.embed_dim, self.num_heads,
-                self.in_proj_weight, self.in_proj_bias,
-                self.bias_k, self.bias_v, self.add_zero_attn,
-                self.dropout, self.out_proj.weight, self.out_proj.bias,
-                training=self.training,
-                key_padding_mask=key_padding_mask, need_weights=need_weights,
-                attn_mask=attn_mask, use_separate_proj_weight=True,
-                q_proj_weight=self.q_proj_weight, k_proj_weight=self.k_proj_weight,
-                v_proj_weight=self.v_proj_weight)
-        else:
-            return F.multi_head_attention_forward(
-                query, key, value, self.embed_dim, self.num_heads,
-                self.in_proj_weight, self.in_proj_bias,
-                self.bias_k, self.bias_v, self.add_zero_attn,
-                self.dropout, self.out_proj.weight, self.out_proj.bias,
-                training=self.training,
-                key_padding_mask=key_padding_mask, need_weights=need_weights,
-                attn_mask=attn_mask)
