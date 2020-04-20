@@ -37,7 +37,7 @@ class RelationAwareMultiheadAttention(nn.Module):
         v_tmp = v_tmp.unsqueeze(2).repeat(1, 1, seq_len, 1)
         k_tmp = torch.add(k_tmp, 1, r)
         v_tmp = torch.add(v_tmp, 1, r)
-        #################################
+
         # split all tensors to num_heads
         q_tmp = q_tmp.view(batch_size, seq_len, self.num_heads, self.head_dim)
         k_tmp = k_tmp.view(batch_size, seq_len, seq_len, self.num_heads, self.head_dim)
@@ -48,14 +48,18 @@ class RelationAwareMultiheadAttention(nn.Module):
         k_tmp = k_tmp.transpose(2, 3)
         v_tmp = v_tmp.transpose(2, 3)
 
-        scores = torch.matmul(q_tmp, k_tmp.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        # compute e_ij for each pair
+        scores = torch.stack([torch.matmul(q_tmp[:, :, i, :].unsqueeze(2), k_tmp[:, i, :, :, :].transpose(-2, -1)).squeeze(2) for i in range(seq_len)], dim=2) / math.sqrt(self.head_dim)
+
+        # compute alpha_ij for each pair
         alpha = F.softmax(scores, -1)
 
         if self.dropout is not None:
             alpha = self.dropout(alpha)
 
-        out = torch.matmul(alpha, v_tmp)
+        # compute z_i for each token
+        z = torch.stack([torch.matmul(alpha[:, :, i, :].unsqueeze(2), v_tmp[:, i, :, :, :]).squeeze(2) for i in range(seq_len)], dim=1)
 
-
-        print('hello')
+        # concat outputs of each head and return the new representation of the sequence
+        return z.view(batch_size, seq_len, -1)
 

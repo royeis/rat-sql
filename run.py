@@ -4,7 +4,6 @@ import torch
 import os
 from DatasetReader import DatasetReader
 from Encoder import Encoder
-from RelationAwareMultiheadAttention import RelationAwareMultiheadAttention
 
 lemmatizer = WordNetLemmatizer()
 
@@ -130,6 +129,10 @@ if __name__ == '__main__':
 
     # test
     encoder = Encoder()
-    logits = encoder(input_examples[0].sequence, input_examples[0].relations)
+    for i, ex in enumerate(input_examples):
+        if i % 20 == 0:
+            print(f'example {i} / {len(input_examples)}')
+        logits = encoder(ex.sequence, ex.relations)
+        print('done')
 
     print('done')
