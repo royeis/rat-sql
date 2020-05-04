@@ -1,6 +1,6 @@
-import json
 import torch
-from transformers import BertTokenizer, BertModel
+from transformers import BertModel, BertTokenizer
+from Utils import disambiguate_items
 
 tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 tokenizer.bos_token = '[CLS]'
@@ -13,53 +13,42 @@ def clip(a, d=2):
     return max(-1 * d, min(d, a))
 
 
-class DatasetReader(object):
-    def __init__(self, dataset_path):
-        self.dataset_path = dataset_path
-        self.questions = []
-        self.schemas = []
-        self.schema_dict = {}
-        self.processed_questions = []
+class Question(object):
 
-    def read_all(self, schemas_files=['tables.json'], questions_files=['train_spider.json', 'train_others.json']):
-        for f in schemas_files:
-            self.read_schemas_file(f)
+    def __init__(self, question_dict, schema):
+        self.db_id = question_dict['db_id']
+        self.tokens = [tok.lower() for tok in question_dict['question_toks']]
+        self.query_toks = question_dict['query_toks_no_value'] or None
+        if self.query_toks is not None:
+            self.query_toks = disambiguate_items(self.db_id, self.query_toks, schema)
+        self.sql = question_dict['sql']
+        self.q_relations = self.prepare_question_relations()
+        self.q_embedding = self.get_question_embedding()
 
-        for f in questions_files:
-            self.read_questions_file(f)
+    def prepare_question_relations(self):
+        relations = [[18 for i in range(len(self.tokens))] for j in range(len(self.tokens))]
+        for i in range(len(self.tokens) - 1):
+            for j in range(i, len(self.tokens)):
+                d = clip(j-i)
+                relations[i][j] += d
+                relations[j][i] -= d
+        return relations
 
-        self.prepare_schema_dict()
-        self.process_questions()
+    def get_question_embedding(self):
+        tokens = [tokenizer.bos_token] + self.tokens + [tokenizer.eos_token]
+        q_tokenizer_ids = torch.tensor(tokenizer.convert_tokens_to_ids(tokens)).unsqueeze(0)
 
-    def read_schemas_file(self, file_name):
-        with open(self.dataset_path + file_name) as f:
-            schemas_read = json.load(f)
-        self.schemas += schemas_read
-
-    def read_questions_file(self, file_name):
-        with open(self.dataset_path + file_name) as f:
-            questions_read = json.load(f)
-        self.questions += questions_read
-
-    def process_questions(self):
-        print('processing questions')
-        for i, q in enumerate(self.questions):
-            if i % 200 == 0:
-                print(f'question: {i} / {len(self.questions) - 1}')
-            self.processed_questions.append(Question(q))
-
-    def prepare_schema_dict(self):
-        print('processing schemas')
-        for i, s in enumerate(self.schemas):
-            if i % 10 == 0:
-                print(f'schema: {i} / {len(self.schemas) - 1}')
-            self.schema_dict[s['db_id']] = Schema(s)
+        with torch.no_grad():
+            embeds = encoder(q_tokenizer_ids)[0]
+            return embeds.narrow(1, 1, len(self.tokens))
 
 
 class Schema(object):
 
     def __init__(self, schema_dict):
         self.db_id = schema_dict['db_id']
+        self.table_names_original = schema_dict['table_names_original']
+        self.column_names_original = schema_dict['column_names_original']
         self.table_names = schema_dict['table_names']
         self.column_names = schema_dict['column_names']
         self.column_types = schema_dict['column_types']
@@ -163,31 +152,10 @@ class Schema(object):
         return torch.cat(schema_embeds, 1)
 
 
-class Question(object):
+class SpiderContext(object):
+    def __init__(self, question: Question, schema: Schema):
+        self.question = question
+        self.schema = schema
 
-    def __init__(self, question_dict):
-        self.db_id = question_dict['db_id']
-        self.tokens = [tok.lower() for tok in question_dict['question_toks']]
-        self.query_toks = question_dict['query_toks']
-        self.sql = question_dict['sql']
-        self.q_relations = self.prepare_question_relations()
-        self.q_embedding = self.get_question_embedding()
-
-    def prepare_question_relations(self):
-        relations = [[18 for i in range(len(self.tokens))] for j in range(len(self.tokens))]
-        for i in range(len(self.tokens) - 1):
-            for j in range(i, len(self.tokens)):
-                d = clip(j-i)
-                relations[i][j] += d
-                relations[j][i] -= d
-        return relations
-
-    def get_question_embedding(self):
-        tokens = [tokenizer.bos_token] + self.tokens + [tokenizer.eos_token]
-        q_tokenizer_ids = torch.tensor(tokenizer.convert_tokens_to_ids(tokens)).unsqueeze(0)
-
-        with torch.no_grad():
-            embeds = encoder(q_tokenizer_ids)[0]
-            return embeds.narrow(1, 1, len(self.tokens))
 
 

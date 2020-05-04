@@ -17,9 +17,14 @@ class RelationAwareMultiheadAttention(nn.Module):
         self.W_Q = Linear(embed_dim, embed_dim, bias=False)
         self.W_K = Linear(embed_dim, embed_dim, bias=False)
         self.W_V = Linear(embed_dim, embed_dim, bias=False)
-        self.relation_bias = nn.Embedding(33, embed_dim)
+
+        # The number of different relations is 33. We add another dummy relation for pairs the are in fact paddings.
+        # This is necessary to batch multiple input sequences with varying lengths together.
+        self.relation_bias = nn.Embedding(34, embed_dim)
 
     def forward(self, query, key, value, relations):
+        # We assume input sequence of shape (batch size, sequence length, embedding dimension)
+
         batch_size = query.size(0)
         seq_len = query.size(1)
         assert seq_len == relations.size(1), "there should be a relation between each pair of items in the input"
