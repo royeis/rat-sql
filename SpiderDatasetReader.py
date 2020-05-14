@@ -1,12 +1,8 @@
 import json
-from typing import Iterable, List, Dict
 import numpy as np
 import torch
 from nltk.stem import WordNetLemmatizer
-from allennlp.data import DatasetReader, Instance, Field
-from allennlp.data.fields import ProductionRuleField, ListField, IndexField, MetadataField
 from SpiderWorld import SpiderWorld
-from TensorField import SequenceTensorField, RelationsTensorField
 from SpiderContext import SpiderContext, Question, Schema
 import os
 
@@ -21,7 +17,7 @@ def get_ngrams(tokens, max_n=5):
     return ngrams
 
 
-class SpiderDatasetReader(DatasetReader):
+class SpiderDatasetReader(object):
 
     def __init__(self):
         super().__init__(lazy=False)
@@ -31,7 +27,7 @@ class SpiderDatasetReader(DatasetReader):
         self.processed_questions = []
 
     # Since there are multiple input files file_path we assume file_path points to the dataset directory
-    def _read(self, file_path: str) -> Iterable[Instance]:
+    def _read(self, file_path):
         self.dataset_path = file_path
 
         if not os.path.exists('processed_input.pt'):
@@ -49,11 +45,10 @@ class SpiderDatasetReader(DatasetReader):
         else:
             print('using processed data from cache')
             input_instances = torch.load('processed_input.pt')
-        for ins in input_instances:
-            yield ins
+        return input_instances
 
-    def text_to_instance(self, context: SpiderContext) -> Instance:
-        fields: Dict[str, Field] = {}
+    def text_to_instance(self, context: SpiderContext):
+        instance = {}
         question = context.question
         schema = context.schema
 
@@ -67,8 +62,8 @@ class SpiderDatasetReader(DatasetReader):
         question_embedding = question.q_embedding
         sequence = torch.cat([schema_embedding, question_embedding], 1)
 
-        fields['sequence'] = SequenceTensorField(sequence)
-        fields['relations'] = RelationsTensorField(relations)
+        instance['sequence'] = sequence
+        instance['relations'] = relations
 
         world = SpiderWorld(question, schema, query=question.query_toks)
 
@@ -80,32 +75,30 @@ class SpiderDatasetReader(DatasetReader):
         elif action_sequence is None:
             return None
 
-        index_fields: List[Field] = []
-        production_rule_fields: List[Field] = []
+        action_sequence_indices = []
+        valid_actions = []
 
         for production_rule in all_actions:
             nonterminal, rhs = production_rule.split(' -> ')
             production_rule = ' '.join(production_rule.split(' '))
-            field = ProductionRuleField(production_rule,
-                                        world.is_global_rule(rhs),
-                                        nonterminal=nonterminal)
-            production_rule_fields.append(field)
 
-        valid_actions_field = ListField(production_rule_fields)
-        fields["valid_actions"] = valid_actions_field
+            prod_dict = {'rule': production_rule, 'global': world.is_global_rule(rhs), 'nonterminal': nonterminal}
 
-        action_map = {action.rule: i  # type: ignore
-                      for i, action in enumerate(valid_actions_field.field_list)}
+            valid_actions.append(prod_dict)
+
+        instance["valid_actions"] = valid_actions
+
+        action_map = {action['rule']: i  # type: ignore
+                      for i, action in enumerate(valid_actions)}
 
         for production_rule in action_sequence:
-            index_fields.append(IndexField(action_map[production_rule], valid_actions_field))
+            action_sequence_indices.append(action_map[production_rule])
         if not action_sequence:
-            index_fields = [IndexField(-1, valid_actions_field)]
+            action_sequence_indices = []
 
-        action_sequence_field = ListField(index_fields)
-        fields["action_sequence"] = action_sequence_field
-        fields["world"] = MetadataField(world)
-        return Instance(fields)
+        instance["action_sequence"] = action_sequence_indices
+        instance["world"] = world
+        return instance
 
     def get_relations_tensor(self,
                              schema_graph,

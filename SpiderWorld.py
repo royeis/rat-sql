@@ -5,7 +5,6 @@ from Grammar import GRAMMAR_DICTIONARY, update_grammar_to_be_table_names_free, u
 from Utils import format_grammar_string, initialize_valid_actions, SqlVisitor
 from parsimonious import Grammar
 from parsimonious.exceptions import ParseError
-from allennlp.data.fields import KnowledgeGraphField
 
 
 class SpiderWorld:
